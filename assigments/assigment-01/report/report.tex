@@ -1,0 +1,162 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=2cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=black,urlcolor=blue!50!black,citecolor=black]{hyperref}
+
+\setlist{nosep,leftmargin=*}
+\setlength{\parskip}{3pt}
+\setlength{\parindent}{0pt}
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+\title{\vspace{-1.2cm}\textbf{CS7IS3 Assignment 1: A Lucene Search Engine for the Cranfield Collection}}
+\author{Name: \rule{4cm}{0.4pt} \qquad Student ID: \rule{3cm}{0.4pt}}
+\date{\vspace{-0.6cm}}
+
+\begin{document}
+\maketitle
+
+\section{Implementation}
+
+The system is a Java~21/Maven project built on Apache Lucene~10.3.2
+(\code{lucene-core}, \code{lucene-analysis-common}, \code{lucene-queryparser}).
+A single script, \code{run.sh}, builds the jar, compiles NIST \code{trec\_eval}, indexes the
+collection, runs every analyzer/similarity combination and prints a summary table.
+\code{run.sh demo} starts an interactive search mode that prints the parsed query and the top~10 titles.
+
+\begin{itemize}
+  \item \textbf{Parsing} (\code{CranParser}). Reads the SMART-format files
+  \code{cran.all.1400} and \code{cran.qry}, splitting records on \code{.I} and collecting the
+  \code{.T} (title), \code{.A} (author), \code{.B} (bibliography) and \code{.W} (abstract)
+  sections. The query ids in \code{cran.qry} are not contiguous (001, 002, 004, \dots, 365),
+  while \code{cranqrel} numbers the queries 1--225 in file order. Queries are therefore
+  renumbered by position; without this step most evaluation scores would be wrong.
+  \item \textbf{Indexing} (\code{Indexer}). Each abstract becomes a Lucene \code{Document}
+  with a stored, untokenised \code{id} (\code{StringField}) and \code{TextField}s for
+  \code{title}, \code{author}, \code{biblio} and \code{content}. There is one index per
+  analyzer, so analyzers can be compared side by side.
+  \item \textbf{Searching} (\code{Searcher}). Each query is escaped and parsed by a
+  \code{MultiFieldQueryParser} over \code{title} and \code{content} with OR semantics, using
+  the same analyzer as at index time. The scoring model is set on the \code{IndexSearcher};
+  the built-in similarities share the same length-norm encoding, so one index serves every
+  model. The top 1000 documents per query are written in TREC run format
+  (\code{qid Q0 docno rank score tag}).
+  \item \textbf{Evaluation}. Cleverdon's grades run from 1 (complete answer) to 4 (minimum
+  interest), but \code{trec\_eval} treats higher values as more relevant, so grades are mapped
+  $g \mapsto 5-g$. The 225 entries graded $-1$ are not real judgements (the same document
+  appears for several unrelated queries) and are dropped, leaving 1612 judgements. Runs are
+  scored with MAP, P@5, P@10, Recall@100, Recall@1000 and nDCG@10.
+\end{itemize}
+
+\section{Choice of Analyzers}
+
+Five analysis chains were compared (Table~\ref{tab:analyzers}). The chosen \emph{custom}
+analyzer is:
+\code{StandardTokenizer} $\rightarrow$ \code{EnglishPossessiveFilter} $\rightarrow$
+\code{LowerCaseFilter} $\rightarrow$ \code{ASCIIFoldingFilter} $\rightarrow$
+\code{StopFilter} $\rightarrow$ \code{PorterStemFilter}.
+
+\begin{itemize}
+  \item \textbf{Tokenisation.} \code{StandardTokenizer} follows Unicode word-break rules. It
+  removes punctuation such as the frequent ``\code{ .}'' and splits hyphenated compounds such
+  as \emph{boundary-layer} into their parts, so they match unhyphenated query terms.
+  Whitespace splitting keeps punctuation attached to words and was the worst chain.
+  \item \textbf{Stop words.} The Cranfield queries are full natural-language questions
+  (\emph{``what similarity laws must be obeyed when constructing aeroelastic models\dots''}).
+  Many query words are question words, auxiliaries or filler (\emph{what, can, does, obtained,
+  available, so far}). They are missing from Lucene's 33-word default list, yet occur in most
+  abstracts. Because each query is an OR of its terms, they add noise to the scores, so about
+  50 such words were added to the Lucene English stop list.
+  \item \textbf{Stemming.} Aerodynamics abstracts use many inflected forms
+  (\emph{plate/plates, heated/heating, flows/flow}). Stemming gave the largest single gain.
+  Porter's aggressive conflation beat the more conservative Krovetz stemmer (KStem) slightly.
+\end{itemize}
+
+\section{Scoring Models}
+
+\begin{itemize}
+  \item \textbf{Vector Space Model}: \code{ClassicSimilarity}, Lucene's TF-IDF cosine model
+  with $tf=\sqrt{f}$, $idf = 1+\ln\frac{N}{df+1}$ and length norm $1/\sqrt{|d|}$.
+  \item \textbf{BM25}: \code{BM25Similarity} with $k_1=1.2$, $b=0.75$. A grid over
+  $k_1\in\{0.6,1.2,2.0\}$ and $b\in\{0.5,0.75,0.9\}$ changed MAP by less than 0.012, so the
+  defaults were kept.
+  \item \textbf{Additional models}: a Dirichlet-smoothed language model ($\mu=1000$), a
+  Jelinek--Mercer language model ($\lambda=0.7$), and Divergence From Randomness (DFR,
+  I(n)-B-H2).
+\end{itemize}
+
+\textbf{Field weighting.} A title boost of 2 was tried first and then tuned. The \code{.W}
+abstract already repeats the title, so extra title weight double-counts it. With custom
+analyzer + BM25, MAP was 0.305 (title ignored), \textbf{0.317 (boost 1)}, 0.301 (boost 2) and
+0.281 (boost 4). Boost 1 is used in every reported run.
+
+\section{Results}
+
+\begin{table}[h]
+\centering\small
+\caption{Scoring models with the custom analyzer (225 queries, top 1000 results per query).}
+\label{tab:sims}
+\begin{tabular}{lcccccc}
+\toprule
+Similarity & MAP & P@5 & P@10 & R@100 & R@1000 & nDCG@10\\
+\midrule
+DFR (I(n)-B-H2)            & \textbf{0.3327} & \textbf{0.3502} & \textbf{0.2573} & \textbf{0.7669} & \textbf{0.9499} & \textbf{0.3974}\\
+BM25                       & 0.3172 & 0.3316 & 0.2484 & 0.7482 & 0.9486 & 0.3854\\
+LM Jelinek--Mercer         & 0.3051 & 0.3218 & 0.2400 & 0.7381 & 0.9496 & 0.3770\\
+VSM (Classic TF-IDF)       & 0.2860 & 0.3022 & 0.2262 & 0.7249 & 0.9486 & 0.3554\\
+LM Dirichlet               & 0.2792 & 0.2942 & 0.2147 & 0.7161 & 0.9497 & 0.3443\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering\small
+\caption{Effect of the analyzer on MAP.}
+\label{tab:analyzers}
+\begin{tabular}{llccc}
+\toprule
+Analyzer & Pipeline & VSM & BM25 & DFR\\
+\midrule
+whitespace & whitespace split only                         & 0.2108 & 0.2535 & 0.2716\\
+standard   & StandardTokenizer + lowercase                 & 0.2309 & 0.2848 & 0.3043\\
+english    & Lucene \code{EnglishAnalyzer} (33 stop words, Porter) & 0.2838 & 0.3107 & 0.3297\\
+kstem      & custom stop list + KStem                      & 0.2838 & 0.3135 & 0.3274\\
+custom     & custom stop list + Porter                     & \textbf{0.2860} & \textbf{0.3172} & \textbf{0.3327}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Discussion.} The probabilistic models clearly beat the vector space model: BM25
+improves MAP by 11\% relative to TF-IDF (0.317 vs.\ 0.286), and DFR does best on every
+precision measure (MAP 0.333, P@5 0.350). BM25 saturates term frequency and normalises
+for document length. This suits short abstracts, where a repeated term should not dominate
+the score. DFR has no parameters to tune and is robust on small collections. The Dirichlet
+language model is the weakest probabilistic model: with $\mu=1000$ and abstracts averaging
+about 160 words, the collection statistics outweigh each document's own term statistics.
+Analysis matters as much as the scoring model. Under BM25, going from whitespace tokenisation
+to the custom chain raises MAP from 0.254 to 0.317 (+25\%). Most of this comes from correct
+tokenisation and lowercasing (+0.031) and from stemming and stop words (+0.026); the extended
+stop list adds a further +0.007. Recall@1000 is about 0.95 for every configuration, so the
+models differ in how they \emph{rank} relevant documents, not in whether they find them.
+BM25 is used for the demonstration because it is the standard Lucene baseline. DFR is
+reported as the best-performing configuration.
+
+\begin{thebibliography}{9}\small
+\setlength{\itemsep}{0pt}
+\bibitem{lucene} Apache Software Foundation. \emph{Apache Lucene 10.3 Documentation}. \url{https://lucene.apache.org/}
+\bibitem{cleverdon} C.~Cleverdon. The Cranfield tests on index language devices. \emph{Aslib Proceedings}, 19(6):173--194, 1967.
+\bibitem{salton} G.~Salton, A.~Wong, C.~S.~Yang. A vector space model for automatic indexing. \emph{Communications of the ACM}, 18(11):613--620, 1975.
+\bibitem{bm25} S.~Robertson, H.~Zaragoza. The probabilistic relevance framework: BM25 and beyond. \emph{Foundations and Trends in IR}, 3(4):333--389, 2009.
+\bibitem{dfr} G.~Amati, C.~J.~van~Rijsbergen. Probabilistic models of information retrieval based on measuring the divergence from randomness. \emph{ACM TOIS}, 20(4):357--389, 2002.
+\bibitem{lm} C.~Zhai, J.~Lafferty. A study of smoothing methods for language models applied to information retrieval. \emph{ACM TOIS}, 22(2):179--214, 2004.
+\bibitem{porter} M.~F.~Porter. An algorithm for suffix stripping. \emph{Program}, 14(3):130--137, 1980.
+\bibitem{trec} NIST. \emph{trec\_eval}. \url{https://github.com/usnistgov/trec_eval}
+\end{thebibliography}
+
+\end{document}
