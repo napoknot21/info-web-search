@@ -1,0 +1,5 @@
+target/
+index/
+results/
+trec_eval/
+*.tar.gz
