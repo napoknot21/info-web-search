@@ -32,4 +32,4 @@ for run in results/*.run; do
     get() { awk -v m="$1" '$1==m && $2=="all" {print $3}' "results/$tag.eval"; }
     printf "%-12s %-12s %7s %7s %7s %7s %9s %8s\n" "${tag%_*}" "${tag#*_}" \
         "$(get map)" "$(get P_5)" "$(get P_10)" "$(get recall_100)" "$(get recall_1000)" "$(get ndcg_cut_10)"
-done | sort -k3 -r | tee results/summary.txt
+done | LC_ALL=C sort -b -k3,3gr | tee results/summary.txt
